@@ -18,6 +18,11 @@ COPY --from=celestia-app /bin/celestia-appd /bin/
 
 COPY entrypoint.sh /opt/entrypoint.sh
 
+# Expose ports:
+# 26657 - Validator RPC
+# 26658 - Bridge RPC
+# 26659 - Bridge Gateway
+# 9090  - Validator gRPC
 EXPOSE 26657 26658 26659 9090
 
 ENTRYPOINT [ "/bin/bash", "/opt/entrypoint.sh" ]
