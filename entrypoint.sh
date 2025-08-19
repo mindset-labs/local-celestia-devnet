@@ -39,7 +39,7 @@ celestia-appd keys add "$VALIDATOR_NAME" --keyring-backend="$KEYRING_BACKEND"
 
 # Create genesis transaction (this replaces add-genesis-account + gentx)
 echo "📝 Creating genesis transaction..."
-celestia-appd gentx "$VALIDATOR_NAME" "$STAKE_AMOUNT" \
+celestia-appd genesis gentx "$VALIDATOR_NAME" "$STAKE_AMOUNT" \
   --chain-id "$CHAINID" \
   --moniker "$MONIKER" \
   --keyring-backend="$KEYRING_BACKEND"
