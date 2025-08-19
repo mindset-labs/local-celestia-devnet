@@ -5,13 +5,12 @@ set -e
 CHAINID="${CHAINID:-private}"
 VALIDATOR_NAME="${VALIDATOR_NAME:-validator}"
 MONIKER="${MONIKER:-celestia-devnet}"
-COINS="${COINS:-1000000000000000utia}"
 STAKE_AMOUNT="${STAKE_AMOUNT:-5000000000utia}"
+KEYRING_BACKEND="${KEYRING_BACKEND:-test}"
 
 # Paths
 APP_PATH="/home/celestia/.celestia-app"
 NODE_PATH="/home/celestia/bridge"
-KEYRING_BACKEND="${KEYRING_BACKEND:-test}"
 
 echo "🚀 Starting Celestia devnet initialization..."
 echo "Chain ID: $CHAINID"
@@ -38,18 +37,15 @@ celestia-appd init "$MONIKER" --chain-id "$CHAINID"
 echo "🔑 Creating validator key..."
 celestia-appd keys add "$VALIDATOR_NAME" --keyring-backend="$KEYRING_BACKEND"
 
-# Add genesis account
-echo "💰 Adding genesis account..."
-VALIDATOR_ADDR=$(celestia-appd keys show "$VALIDATOR_NAME" -a --keyring-backend="$KEYRING_BACKEND")
-celestia-appd add-genesis-account "$VALIDATOR_ADDR" "$COINS"
-
-# Create genesis transaction
+# Create genesis transaction (this replaces add-genesis-account + gentx)
 echo "📝 Creating genesis transaction..."
 celestia-appd gentx "$VALIDATOR_NAME" "$STAKE_AMOUNT" \
-  --keyring-backend="$KEYRING_BACKEND" \
-  --chain-id "$CHAINID"
+  --chain-id "$CHAINID" \
+  --moniker "$MONIKER" \
+  --keyring-backend="$KEYRING_BACKEND"
 
 # Collect genesis transactions
+echo "📋 Collecting genesis transactions..."
 celestia-appd collect-gentxs
 
 # Update configuration for external access
@@ -67,23 +63,18 @@ APP_CONFIG_FILE="$HOME/.celestia-app/config/app.toml"
 sed -i 's/enable = false/enable = true/g' "$APP_CONFIG_FILE"
 sed -i 's/address = "127.0.0.1:9090"/address = "0.0.0.0:9090"/g' "$APP_CONFIG_FILE"
 
-# Enable and configure API
-sed -i '/\[api\]/,/\[/{s/enable = false/enable = true/}' "$APP_CONFIG_FILE"
-sed -i 's#address = "tcp://0.0.0.0:1317"#address = "tcp://0.0.0.0:1317"#g' "$APP_CONFIG_FILE"
-
 echo "🚀 Starting celestia-app..."
 celestia-appd start --grpc.enable --api.enable &
 
-# Wait for the first block with improved logic
+# Wait for the first block
 echo "⏳ Waiting for first block..."
 GENESIS=""
 CNT=0
-MAX=60  # Increased timeout
+MAX=60
 
 while [ ${#GENESIS} -le 4 ] && [ $CNT -lt $MAX ]; do
     echo "Attempt $((CNT+1))/$MAX - Checking for genesis block..."
     
-    # Check if the node is responding
     if curl -s http://127.0.0.1:26657/status > /dev/null 2>&1; then
         GENESIS=$(curl -s http://127.0.0.1:26657/block?height=1 2>/dev/null | jq -r '.result.block_id.hash // empty' 2>/dev/null || echo "")
         if [ -n "$GENESIS" ] && [ "$GENESIS" != "null" ]; then
