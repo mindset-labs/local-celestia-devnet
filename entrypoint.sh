@@ -36,7 +36,7 @@ celestia-appd keys add "$VALIDATOR_NAME" --keyring-backend="$KEYRING_BACKEND"
 echo "💰 Adding genesis account with balance..."
 # Get validator address and add to genesis with sufficient balance
 VALIDATOR_ADDR=$(celestia-appd keys show "$VALIDATOR_NAME" -a --keyring-backend="$KEYRING_BACKEND")
-celestia-appd add-genesis-account "$VALIDATOR_ADDR" "$COIN_AMOUNT"
+celestia-appd genesis add-genesis-account "$VALIDATOR_ADDR" "$COIN_AMOUNT"
 
 echo "📝 Creating genesis transaction..."
 # Create genesis transaction - this will now work because account has balance
