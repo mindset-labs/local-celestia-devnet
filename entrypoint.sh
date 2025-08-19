@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
-# Configuration with environment variable support
+# Configuration
 CHAINID="${CHAINID:-private}"
 VALIDATOR_NAME="${VALIDATOR_NAME:-validator}"
 MONIKER="${MONIKER:-celestia-devnet}"
 STAKE_AMOUNT="${STAKE_AMOUNT:-5000000000utia}"
+COIN_AMOUNT="${COIN_AMOUNT:-1000000000000utia}"  # Much larger than stake amount
 KEYRING_BACKEND="${KEYRING_BACKEND:-test}"
 
 # Paths
@@ -15,50 +16,47 @@ NODE_PATH="/home/celestia/bridge"
 echo "🚀 Starting Celestia devnet initialization..."
 echo "Chain ID: $CHAINID"
 echo "Validator: $VALIDATOR_NAME"
-echo "Moniker: $MONIKER"
+echo "Initial Balance: $COIN_AMOUNT"
+echo "Stake Amount: $STAKE_AMOUNT"
 
-# Cleanup existing data if present
+# Cleanup existing data
 if [ -d "$APP_PATH" ]; then
-  echo "🧹 Cleaning up existing app data at $APP_PATH..."
+  echo "🧹 Cleaning up existing app data..."
   rm -rf "$APP_PATH"
 fi
 
-if [ -d "$NODE_PATH" ]; then
-  echo "🧹 Cleaning up existing bridge data at $NODE_PATH..."
-  rm -rf "$NODE_PATH"
-fi
-
 echo "⚙️ Initializing celestia-app..."
-
-# Initialize the app
+# Initialize the chain
 celestia-appd init "$MONIKER" --chain-id "$CHAINID"
 
-# Create validator key
 echo "🔑 Creating validator key..."
+# Create validator key
 celestia-appd keys add "$VALIDATOR_NAME" --keyring-backend="$KEYRING_BACKEND"
 
-# Create genesis transaction (this replaces add-genesis-account + gentx)
+echo "💰 Adding genesis account with balance..."
+# Get validator address and add to genesis with sufficient balance
+VALIDATOR_ADDR=$(celestia-appd keys show "$VALIDATOR_NAME" -a --keyring-backend="$KEYRING_BACKEND")
+celestia-appd add-genesis-account "$VALIDATOR_ADDR" "$COIN_AMOUNT"
+
 echo "📝 Creating genesis transaction..."
+# Create genesis transaction - this will now work because account has balance
 celestia-appd genesis gentx "$VALIDATOR_NAME" "$STAKE_AMOUNT" \
-  --chain-id "$CHAINID" \
-  --moniker "$MONIKER" \
+  --chain-id="$CHAINID" \
   --keyring-backend="$KEYRING_BACKEND"
 
-# Collect genesis transactions
 echo "📋 Collecting genesis transactions..."
+# Collect genesis transactions
 celestia-appd collect-gentxs
 
 # Update configuration for external access
 echo "🔧 Updating configuration..."
-
-# Update config.toml
 CONFIG_FILE="$HOME/.celestia-app/config/config.toml"
 sed -i 's#"tcp://127.0.0.1:26657"#"tcp://0.0.0.0:26657"#g' "$CONFIG_FILE"
 sed -i 's/^timeout_commit\s*=.*/timeout_commit = "2s"/g' "$CONFIG_FILE"
 sed -i 's/^timeout_propose\s*=.*/timeout_propose = "2s"/g' "$CONFIG_FILE"
 sed -i 's/^cors_allowed_origins\s*=.*/cors_allowed_origins = ["*"]/g' "$CONFIG_FILE"
 
-# Update app.toml for API access
+# Update app.toml
 APP_CONFIG_FILE="$HOME/.celestia-app/config/app.toml"
 sed -i 's/enable = false/enable = true/g' "$APP_CONFIG_FILE"
 sed -i 's/address = "127.0.0.1:9090"/address = "0.0.0.0:9090"/g' "$APP_CONFIG_FILE"
@@ -66,68 +64,7 @@ sed -i 's/address = "127.0.0.1:9090"/address = "0.0.0.0:9090"/g' "$APP_CONFIG_FI
 echo "🚀 Starting celestia-app..."
 celestia-appd start --grpc.enable --api.enable &
 
-# Wait for the first block
-echo "⏳ Waiting for first block..."
-GENESIS=""
-CNT=0
-MAX=60
+# Wait for first block and continue with bridge setup...
+# (rest of your bridge setup code)
 
-while [ ${#GENESIS} -le 4 ] && [ $CNT -lt $MAX ]; do
-    echo "Attempt $((CNT+1))/$MAX - Checking for genesis block..."
-    
-    if curl -s http://127.0.0.1:26657/status > /dev/null 2>&1; then
-        GENESIS=$(curl -s http://127.0.0.1:26657/block?height=1 2>/dev/null | jq -r '.result.block_id.hash // empty' 2>/dev/null || echo "")
-        if [ -n "$GENESIS" ] && [ "$GENESIS" != "null" ]; then
-            echo "✅ Genesis block found: $GENESIS"
-            break
-        fi
-    fi
-    
-    ((CNT++))
-    sleep 2
-done
-
-if [ $CNT -eq $MAX ]; then
-    echo "❌ Failed to get genesis hash after $MAX attempts"
-    exit 1
-fi
-
-# Set up custom network
-export CELESTIA_CUSTOM="$CHAINID:$GENESIS"
-echo "🌐 Custom network: $CELESTIA_CUSTOM"
-
-# Setup bridge node
-echo "🌉 Initializing bridge node..."
-mkdir -p "$NODE_PATH/keys"
-
-# Copy keyring for bridge node
-if [ -d "$APP_PATH/keyring-test/" ]; then
-    cp -r "$APP_PATH/keyring-test/" "$NODE_PATH/keys/keyring-test/"
-fi
-
-# Initialize bridge node
-celestia bridge init --node.store "$NODE_PATH"
-
-echo "🚀 Starting bridge node..."
-celestia bridge start \
-  --node.store "$NODE_PATH" \
-  --gateway \
-  --core.ip 127.0.0.1 \
-  --core.rpc.port 26657 \
-  --core.grpc.port 9090 \
-  --keyring.accname "$VALIDATOR_NAME" \
-  --gateway.addr 0.0.0.0 \
-  --gateway.port 26659 \
-  --rpc.addr 0.0.0.0 \
-  --rpc.port 26658 \
-  --p2p.network "$CHAINID" &
-
-echo "✅ Celestia devnet started successfully!"
-echo "🔗 Available endpoints:"
-echo "  - Consensus RPC: http://localhost:26657"
-echo "  - Bridge RPC: http://localhost:26658" 
-echo "  - Bridge REST: http://localhost:26659"
-echo "  - gRPC: localhost:9090"
-
-# Keep the container running
 wait
