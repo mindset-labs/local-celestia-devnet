@@ -39,14 +39,22 @@ VALIDATOR_ADDR=$(celestia-appd keys show "$VALIDATOR_NAME" -a --keyring-backend=
 celestia-appd genesis add-genesis-account "$VALIDATOR_ADDR" "$COIN_AMOUNT"
 
 echo "📝 Creating genesis transaction..."
-# Create genesis transaction - this will now work because account has balance
+# Create genesis transaction in offline mode to avoid connection issues
 celestia-appd genesis gentx "$VALIDATOR_NAME" "$STAKE_AMOUNT" \
   --chain-id="$CHAINID" \
-  --keyring-backend="$KEYRING_BACKEND"
+  --keyring-backend="$KEYRING_BACKEND" \
+  --offline \
+  --account-number=0 \
+  --sequence=0
 
 echo "📋 Collecting genesis transactions..."
 # Collect genesis transactions
-celestia-appd collect-gentxs
+celestia-appd genesis collect-gentxs
+
+# Set minimum gas price to 0 for devnet to avoid genesis transaction fee issues
+echo "💸 Setting minimum gas price to 0 for devnet..."
+GENESIS_FILE="$HOME/.celestia-app/config/genesis.json"
+jq '.app_state.minfee.network_min_gas_price = "0.000000000000000000" | .app_state.minfee.params.network_min_gas_price = "0.000000000000000000"' "$GENESIS_FILE" > "${GENESIS_FILE}.tmp" && mv "${GENESIS_FILE}.tmp" "$GENESIS_FILE"
 
 # Update configuration for external access
 echo "🔧 Updating configuration..."
@@ -62,9 +70,6 @@ sed -i 's/enable = false/enable = true/g' "$APP_CONFIG_FILE"
 sed -i 's/address = "127.0.0.1:9090"/address = "0.0.0.0:9090"/g' "$APP_CONFIG_FILE"
 
 echo "🚀 Starting celestia-app..."
-celestia-appd start --grpc.enable --api.enable &
-
-# Wait for first block and continue with bridge setup...
-# (rest of your bridge setup code)
+celestia-appd start --grpc.enable --api.enable --force-no-bbr &
 
 wait
