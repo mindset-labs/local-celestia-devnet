@@ -1,65 +1,142 @@
 #!/usr/bin/env bash
+set -e
 
-CHAINID="test"
+# Configuration with environment variable support
+CHAINID="${CHAINID:-private}"
+VALIDATOR_NAME="${VALIDATOR_NAME:-validator}"
+MONIKER="${MONIKER:-celestia-devnet}"
+COINS="${COINS:-1000000000000000utia}"
+STAKE_AMOUNT="${STAKE_AMOUNT:-5000000000utia}"
 
-# App & node has a celestia user with home dir /home/celestia
+# Paths
 APP_PATH="/home/celestia/.celestia-app"
-NODE_PATH="/home/celestia/bridge/"
+NODE_PATH="/home/celestia/bridge"
+KEYRING_BACKEND="${KEYRING_BACKEND:-test}"
 
-# Check if the folder exists
+echo "🚀 Starting Celestia devnet initialization..."
+echo "Chain ID: $CHAINID"
+echo "Validator: $VALIDATOR_NAME"
+echo "Moniker: $MONIKER"
+
+# Cleanup existing data if present
 if [ -d "$APP_PATH" ]; then
-  # If it exists, delete it
-  echo "The folder $APP_PATH exists. Deleting it..."
+  echo "🧹 Cleaning up existing app data at $APP_PATH..."
   rm -rf "$APP_PATH"
-  echo "Folder deleted."
-else
-  # If it doesn't exist, print a message
-  echo "The folder $APP_PATH does not exist."
 fi
 
-# Build genesis file incl account for passed address
-coins="1000000000000000utia"
-celestia-appd init $CHAINID --chain-id $CHAINID
-celestia-appd keys add validator --keyring-backend="test"
-# this won't work because some proto types are declared twice and the logs output to stdout (dependency hell involving iavl)
-celestia-appd add-genesis-account $(celestia-appd keys show validator -a --keyring-backend="test") $coins
-celestia-appd gentx validator 5000000000utia \
-  --keyring-backend="test" \
-  --chain-id $CHAINID
+if [ -d "$NODE_PATH" ]; then
+  echo "🧹 Cleaning up existing bridge data at $NODE_PATH..."
+  rm -rf "$NODE_PATH"
+fi
 
+echo "⚙️ Initializing celestia-app..."
+
+# Initialize the app
+celestia-appd init "$MONIKER" --chain-id "$CHAINID"
+
+# Create validator key
+echo "🔑 Creating validator key..."
+celestia-appd keys add "$VALIDATOR_NAME" --keyring-backend="$KEYRING_BACKEND"
+
+# Add genesis account
+echo "💰 Adding genesis account..."
+VALIDATOR_ADDR=$(celestia-appd keys show "$VALIDATOR_NAME" -a --keyring-backend="$KEYRING_BACKEND")
+celestia-appd add-genesis-account "$VALIDATOR_ADDR" "$COINS"
+
+# Create genesis transaction
+echo "📝 Creating genesis transaction..."
+celestia-appd gentx "$VALIDATOR_NAME" "$STAKE_AMOUNT" \
+  --keyring-backend="$KEYRING_BACKEND" \
+  --chain-id "$CHAINID"
+
+# Collect genesis transactions
 celestia-appd collect-gentxs
 
-# Set proper defaults and change ports
-# If you encounter: `sed: -I or -i may not be used with stdin` on MacOS you can mitigate by installing gnu-sed
-# https://gist.github.com/andre3k1/e3a1a7133fded5de5a9ee99c87c6fa0d?permalink_comment_id=3082272#gistcomment-3082272
-sed -i'.bak' 's#"tcp://127.0.0.1:26657"#"tcp://0.0.0.0:26657"#g' ~/.celestia-app/config/config.toml
-sed -i'.bak' 's/^timeout_commit\s*=.*/timeout_commit = "2s"/g' ~/.celestia-app/config/config.toml
-sed -i'.bak' 's/^timeout_propose\s*=.*/timeout_propose = "2s"/g' ~/.celestia-app/config/config.toml
+# Update configuration for external access
+echo "🔧 Updating configuration..."
 
-mkdir -p $NODE_PATH/keys
-cp -r $APP_PATH/keyring-test/ $NODE_PATH/keys/keyring-test/
+# Update config.toml
+CONFIG_FILE="$HOME/.celestia-app/config/config.toml"
+sed -i 's#"tcp://127.0.0.1:26657"#"tcp://0.0.0.0:26657"#g' "$CONFIG_FILE"
+sed -i 's/^timeout_commit\s*=.*/timeout_commit = "2s"/g' "$CONFIG_FILE"
+sed -i 's/^timeout_propose\s*=.*/timeout_propose = "2s"/g' "$CONFIG_FILE"
+sed -i 's/^cors_allowed_origins\s*=.*/cors_allowed_origins = ["*"]/g' "$CONFIG_FILE"
 
-# Start the celestia-app
-celestia-appd start --grpc.enable &
+# Update app.toml for API access
+APP_CONFIG_FILE="$HOME/.celestia-app/config/app.toml"
+sed -i 's/enable = false/enable = true/g' "$APP_CONFIG_FILE"
+sed -i 's/address = "127.0.0.1:9090"/address = "0.0.0.0:9090"/g' "$APP_CONFIG_FILE"
 
-# Try to get the genesis hash. Usually first request returns an empty string (port is not open, curl fails), later attempts
-# returns "null" if block was not yet produced.
-GENESIS=
+# Enable and configure API
+sed -i '/\[api\]/,/\[/{s/enable = false/enable = true/}' "$APP_CONFIG_FILE"
+sed -i 's#address = "tcp://0.0.0.0:1317"#address = "tcp://0.0.0.0:1317"#g' "$APP_CONFIG_FILE"
+
+echo "🚀 Starting celestia-app..."
+celestia-appd start --grpc.enable --api.enable &
+
+# Wait for the first block with improved logic
+echo "⏳ Waiting for first block..."
+GENESIS=""
 CNT=0
-MAX=30
-while [ "${#GENESIS}" -le 4 -a $CNT -ne $MAX ]; do
-	GENESIS=$(curl -s http://127.0.0.1:26657/block?height=1 | jq '.result.block_id.hash' | tr -d '"')
-	((CNT++))
-	sleep 1
+MAX=60  # Increased timeout
+
+while [ ${#GENESIS} -le 4 ] && [ $CNT -lt $MAX ]; do
+    echo "Attempt $((CNT+1))/$MAX - Checking for genesis block..."
+    
+    # Check if the node is responding
+    if curl -s http://127.0.0.1:26657/status > /dev/null 2>&1; then
+        GENESIS=$(curl -s http://127.0.0.1:26657/block?height=1 2>/dev/null | jq -r '.result.block_id.hash // empty' 2>/dev/null || echo "")
+        if [ -n "$GENESIS" ] && [ "$GENESIS" != "null" ]; then
+            echo "✅ Genesis block found: $GENESIS"
+            break
+        fi
+    fi
+    
+    ((CNT++))
+    sleep 2
 done
 
-export CELESTIA_CUSTOM=test:$GENESIS
-echo "$CELESTIA_CUSTOM"
+if [ $CNT -eq $MAX ]; then
+    echo "❌ Failed to get genesis hash after $MAX attempts"
+    exit 1
+fi
 
-celestia bridge init --node.store /home/celestia/bridge
+# Set up custom network
+export CELESTIA_CUSTOM="$CHAINID:$GENESIS"
+echo "🌐 Custom network: $CELESTIA_CUSTOM"
+
+# Setup bridge node
+echo "🌉 Initializing bridge node..."
+mkdir -p "$NODE_PATH/keys"
+
+# Copy keyring for bridge node
+if [ -d "$APP_PATH/keyring-test/" ]; then
+    cp -r "$APP_PATH/keyring-test/" "$NODE_PATH/keys/keyring-test/"
+fi
+
+# Initialize bridge node
+celestia bridge init --node.store "$NODE_PATH"
+
+echo "🚀 Starting bridge node..."
 celestia bridge start \
-  --node.store $NODE_PATH --gateway \
+  --node.store "$NODE_PATH" \
+  --gateway \
   --core.ip 127.0.0.1 \
-  --keyring.accname validator \
+  --core.rpc.port 26657 \
+  --core.grpc.port 9090 \
+  --keyring.accname "$VALIDATOR_NAME" \
   --gateway.addr 0.0.0.0 \
+  --gateway.port 26659 \
   --rpc.addr 0.0.0.0 \
+  --rpc.port 26658 \
+  --p2p.network "$CHAINID" &
+
+echo "✅ Celestia devnet started successfully!"
+echo "🔗 Available endpoints:"
+echo "  - Consensus RPC: http://localhost:26657"
+echo "  - Bridge RPC: http://localhost:26658" 
+echo "  - Bridge REST: http://localhost:26659"
+echo "  - gRPC: localhost:9090"
+
+# Keep the container running
+wait
