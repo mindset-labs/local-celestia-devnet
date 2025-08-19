@@ -3,97 +3,17 @@ set -e
 
 # Configuration
 CHAINID="${CHAINID:-private}"
-VALIDATOR_NAME="${VALIDATOR_NAME:-validator}"
-MONIKER="${MONIKER:-celestia-devnet}"
-STAKE_AMOUNT="${STAKE_AMOUNT:-5000000000utia}"
-COIN_AMOUNT="${COIN_AMOUNT:-1000000000000utia}"  # Much larger than stake amount
-KEYRING_BACKEND="${KEYRING_BACKEND:-test}"
+VALIDATOR_HOST="${VALIDATOR_HOST:-celestia-validator}"
+VALIDATOR_PORT="${VALIDATOR_PORT:-26657}"
+GRPC_PORT="${GRPC_PORT:-9090}"
 
 # Paths
-APP_PATH="/home/celestia/.celestia-app"
 NODE_PATH="/home/celestia/bridge"
 
-echo "🚀 Starting Celestia devnet initialization..."
+echo "🌉 Starting Celestia bridge initialization..."
 echo "Chain ID: $CHAINID"
-echo "Validator: $VALIDATOR_NAME"
-echo "Initial Balance: $COIN_AMOUNT"
-echo "Stake Amount: $STAKE_AMOUNT"
-
-# Cleanup existing data
-if [ -d "$APP_PATH" ]; then
-  echo "🧹 Cleaning up existing app data..."
-  rm -rf "$APP_PATH"
-fi
-
-echo "⚙️ Initializing celestia-app..."
-# Initialize the chain
-celestia-appd init "$MONIKER" --chain-id "$CHAINID"
-
-echo "🔑 Creating validator key..."
-# Create validator key
-celestia-appd keys add "$VALIDATOR_NAME" --keyring-backend="$KEYRING_BACKEND"
-
-echo "💰 Adding genesis account with balance..."
-# Get validator address and add to genesis with sufficient balance
-VALIDATOR_ADDR=$(celestia-appd keys show "$VALIDATOR_NAME" -a --keyring-backend="$KEYRING_BACKEND")
-celestia-appd genesis add-genesis-account "$VALIDATOR_ADDR" "$COIN_AMOUNT"
-
-echo "📝 Creating genesis transaction..."
-# Create genesis transaction in offline mode to avoid connection issues
-celestia-appd genesis gentx "$VALIDATOR_NAME" "$STAKE_AMOUNT" \
-  --chain-id="$CHAINID" \
-  --keyring-backend="$KEYRING_BACKEND" \
-  --offline \
-  --account-number=0 \
-  --sequence=0
-
-echo "📋 Collecting genesis transactions..."
-# Collect genesis transactions
-celestia-appd genesis collect-gentxs
-
-# Set minimum gas price to 0 for devnet to avoid genesis transaction fee issues
-echo "💸 Setting minimum gas price to 0 for devnet..."
-GENESIS_FILE="$HOME/.celestia-app/config/genesis.json"
-jq '.app_state.minfee.network_min_gas_price = "0.000000000000000000" | .app_state.minfee.params.network_min_gas_price = "0.000000000000000000"' "$GENESIS_FILE" > "${GENESIS_FILE}.tmp" && mv "${GENESIS_FILE}.tmp" "$GENESIS_FILE"
-
-# Update configuration for external access
-echo "🔧 Updating configuration..."
-CONFIG_FILE="$HOME/.celestia-app/config/config.toml"
-sed -i 's#"tcp://127.0.0.1:26657"#"tcp://0.0.0.0:26657"#g' "$CONFIG_FILE"
-sed -i 's/^timeout_commit\s*=.*/timeout_commit = "2s"/g' "$CONFIG_FILE"
-sed -i 's/^timeout_propose\s*=.*/timeout_propose = "2s"/g' "$CONFIG_FILE"
-sed -i 's/^cors_allowed_origins\s*=.*/cors_allowed_origins = ["*"]/g' "$CONFIG_FILE"
-
-# Update app.toml
-APP_CONFIG_FILE="$HOME/.celestia-app/config/app.toml"
-sed -i 's/enable = false/enable = true/g' "$APP_CONFIG_FILE"
-sed -i 's/address = "127.0.0.1:9090"/address = "0.0.0.0:9090"/g' "$APP_CONFIG_FILE"
-
-echo "🚀 Starting celestia-app..."
-celestia-appd start --grpc.enable --api.enable --force-no-bbr &
-APP_PID=$!
-
-# Wait for the validator to be ready
-echo "⏳ Waiting for validator to be ready..."
-MAX_ATTEMPTS=30
-ATTEMPT=0
-while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-  if curl -s http://localhost:26657/status > /dev/null 2>&1; then
-    echo "✅ Validator is ready!"
-    break
-  fi
-  echo "Waiting for validator... (attempt $((ATTEMPT+1))/$MAX_ATTEMPTS)"
-  sleep 2
-  ATTEMPT=$((ATTEMPT+1))
-done
-
-if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-  echo "❌ Validator failed to start in time"
-  exit 1
-fi
-
-# Initialize and start the bridge node
-echo "🌉 Initializing Celestia bridge node..."
+echo "Validator Host: $VALIDATOR_HOST"
+echo "Bridge Store Path: $NODE_PATH"
 
 # Clean up any existing bridge data
 if [ -d "$NODE_PATH" ]; then
@@ -101,9 +21,52 @@ if [ -d "$NODE_PATH" ]; then
   rm -rf "$NODE_PATH"
 fi
 
+# Wait for the validator to be ready
+echo "⏳ Waiting for validator to be ready..."
+MAX_ATTEMPTS=60
+ATTEMPT=0
+while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+  if curl -s http://${VALIDATOR_HOST}:${VALIDATOR_PORT}/status > /dev/null 2>&1; then
+    echo "✅ Validator RPC is ready!"
+    break
+  fi
+  echo "Waiting for validator RPC... (attempt $((ATTEMPT+1))/$MAX_ATTEMPTS)"
+  sleep 2
+  ATTEMPT=$((ATTEMPT+1))
+done
+
+if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+  echo "❌ Validator RPC failed to start in time"
+  exit 1
+fi
+
+# Wait longer for gRPC to be ready since the validator needs time to start all services
+echo "⏳ Waiting extra time for validator services to fully start..."
+sleep 20
+
+# Debug: Check what's listening on the validator
+echo "🔍 Debugging validator connectivity..."
+echo "Validator Host: ${VALIDATOR_HOST} resolves to:"
+nslookup ${VALIDATOR_HOST} || echo "nslookup failed"
+ping -c 2 ${VALIDATOR_HOST} || echo "ping failed"
+
+echo "Testing connectivity to various ports..."
+for port in 26657 9090 1317; do
+    echo "Testing port $port..."
+    if nc -z ${VALIDATOR_HOST} $port 2>/dev/null; then
+        echo "✅ Port $port is reachable"
+    else
+        echo "❌ Port $port is NOT reachable"
+    fi
+done
+
+# Try to get more details about the gRPC endpoint
+echo "Attempting to query gRPC health..."
+grpcurl -plaintext ${VALIDATOR_HOST}:${GRPC_PORT} list 2>&1 || echo "grpcurl failed (might not be installed)"
+
 # Wait for the validator to stabilize and produce blocks
 echo "⏳ Waiting for validator to stabilize and produce blocks..."
-sleep 10
+sleep 15
 
 # Test that we can actually fetch a block and get the trusted hash
 echo "🔍 Testing validator connectivity and fetching trusted hash..."
@@ -112,7 +75,7 @@ BLOCK_ATTEMPT=0
 TRUSTED_HASH=""
 
 while [ $BLOCK_ATTEMPT -lt $MAX_BLOCK_ATTEMPTS ]; do
-  BLOCK_RESPONSE=$(curl -s http://localhost:26657/block?height=1)
+  BLOCK_RESPONSE=$(curl -s http://${VALIDATOR_HOST}:${VALIDATOR_PORT}/block?height=1)
   if echo "$BLOCK_RESPONSE" | grep -q '"block"' && echo "$BLOCK_RESPONSE" | grep -q '"block_id"'; then
     # Extract the trusted hash from the genesis block
     TRUSTED_HASH=$(echo "$BLOCK_RESPONSE" | jq -r '.result.block_id.hash')
@@ -120,7 +83,7 @@ while [ $BLOCK_ATTEMPT -lt $MAX_BLOCK_ATTEMPTS ]; do
       echo "✅ Retrieved trusted hash: $TRUSTED_HASH"
       
       # Also check that we can get the latest height
-      LATEST_HEIGHT=$(curl -s http://localhost:26657/status | jq -r '.result.sync_info.latest_block_height // "0"')
+      LATEST_HEIGHT=$(curl -s http://${VALIDATOR_HOST}:${VALIDATOR_PORT}/status | jq -r '.result.sync_info.latest_block_height // "0"')
       echo "📊 Latest block height: $LATEST_HEIGHT"
       
       if [ "$LATEST_HEIGHT" -gt "0" ]; then
@@ -136,16 +99,14 @@ done
 
 if [ $BLOCK_ATTEMPT -eq $MAX_BLOCK_ATTEMPTS ] || [ -z "$TRUSTED_HASH" ]; then
   echo "❌ Failed to retrieve trusted hash from validator"
-  echo "Continuing without bridge - validator will still work"
-  wait $APP_PID
-  exit 0
+  exit 1
 fi
 
-# Initialize the bridge with the private network
+# Initialize the bridge with the private network (no --core.port here, like original)
 echo "🔧 Initializing bridge store..."
 celestia bridge init \
   --p2p.network private \
-  --core.ip 127.0.0.1 \
+  --core.ip "$VALIDATOR_HOST" \
   --node.store "$NODE_PATH"
 
 # Update the bridge configuration with the trusted hash
@@ -158,15 +119,15 @@ if grep -q "TrustedHash = \"$TRUSTED_HASH\"" "$BRIDGE_CONFIG"; then
   echo "✅ Bridge configuration updated successfully"
 else
   echo "❌ Failed to update bridge configuration"
-  wait $APP_PID
   exit 1
 fi
 
 # Get the auth token for the bridge
+echo "🔑 Generating bridge auth token..."
 BRIDGE_AUTH_TOKEN=$(celestia bridge auth admin --p2p.network private --node.store "$NODE_PATH")
 echo "🔑 Bridge auth token generated"
 
-# Start the bridge node with retry logic
+# Start the bridge node with retry logic (matching original script)
 echo "🌉 Starting Celestia bridge node..."
 START_ATTEMPTS=3
 BRIDGE_STARTED=false
@@ -176,8 +137,8 @@ for i in $(seq 1 $START_ATTEMPTS); do
   
   celestia bridge start \
     --p2p.network private \
-    --core.ip 127.0.0.1 \
-    --core.port 9090 \
+    --core.ip "$VALIDATOR_HOST" \
+    --core.port "$GRPC_PORT" \
     --rpc.addr 0.0.0.0 \
     --rpc.port 26658 \
     --node.store "$NODE_PATH" \
@@ -230,9 +191,8 @@ for i in $(seq 1 $START_ATTEMPTS); do
 done
 
 if [ "$BRIDGE_STARTED" = true ]; then
-  echo "✨ Celestia devnet is running!"
-  echo "  - Validator RPC: http://localhost:26657"
-  echo "  - Validator gRPC: localhost:9090"
+  echo "✅ Bridge started successfully!"
+  echo "✨ Celestia bridge is running!"
   echo "  - Bridge RPC: http://localhost:26658"
   echo "  - Bridge Gateway: http://localhost:26659"
   echo "  - Bridge Auth Token: $BRIDGE_AUTH_TOKEN"
@@ -243,14 +203,9 @@ if [ "$BRIDGE_STARTED" = true ]; then
   echo "       -d '{\"id\":1,\"jsonrpc\":\"2.0\",\"method\":\"header.LocalHead\",\"params\":[]}' \\"
   echo "       http://localhost:26658"
   
-  # Wait for both processes
-  wait $APP_PID $BRIDGE_PID
+  # Wait for the bridge process
+  wait $BRIDGE_PID
 else
   echo "⚠️ Failed to start bridge after $START_ATTEMPTS attempts"
-  echo "Celestia validator is still running!"
-  echo "  - Validator RPC: http://localhost:26657"
-  echo "  - Validator gRPC: localhost:9090"
-  
-  # Wait for validator process only
-  wait $APP_PID
+  exit 1
 fi

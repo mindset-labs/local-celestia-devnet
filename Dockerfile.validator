@@ -1,0 +1,24 @@
+FROM ghcr.io/celestiaorg/celestia-app:latest
+
+USER root
+
+# hadolint ignore=DL3018
+RUN apk --no-cache add \
+        curl \
+        jq \
+        openssl \
+        netcat-openbsd \
+        net-tools \
+        bind-tools
+
+USER celestia
+
+COPY entrypoint-validator.sh /opt/entrypoint-validator.sh
+
+# Expose validator ports:
+# 26657 - Validator RPC
+# 9090  - Validator gRPC
+# 26656 - P2P
+EXPOSE 26657 9090 26656
+
+ENTRYPOINT [ "/bin/bash", "/opt/entrypoint-validator.sh" ]

@@ -1,0 +1,56 @@
+version: "3.8"
+services:
+  celestia-validator:
+    build:
+      context: .
+      dockerfile: Dockerfile.validator
+    image: celestia-validator:local
+    container_name: celestia-validator
+    environment:
+      - CHAINID=private
+      - VALIDATOR_NAME=validator
+      - MONIKER=celestia-devnet
+    volumes:
+      - celestia_validator_data:/home/celestia
+    ports:
+      - "9090:9090"
+      - "26656:26656"
+      - "26657:26657"
+    networks:
+      - celestia-network
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -f http://localhost:26657/status && nc -z localhost 9090"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+
+  celestia-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    image: celestia-bridge:local
+    container_name: celestia-bridge
+    environment:
+      - P2P_NETWORK=private
+      - VALIDATOR_HOST=celestia-validator
+      - VALIDATOR_PORT=26657
+      - GRPC_PORT=9090
+    volumes:
+      - celestia_bridge_data:/home/celestia
+    ports:
+      - "26658:26658"
+      - "26659:26659"
+    depends_on:
+      celestia-validator:
+        condition: service_healthy
+    networks:
+      - celestia-network
+
+volumes:
+  celestia_validator_data:
+  celestia_bridge_data:
+
+networks:
+  celestia-network:
+    driver: bridge
